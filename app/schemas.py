@@ -1,7 +1,11 @@
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator
+
+
+MEDIA_TYPE_ENTRY = "application/vnd.sas.data.reference.entry+json"
+MEDIA_TYPE_COLLECTION = "application/vnd.sas.collection+json"
 
 
 class DomainType(str, Enum):
@@ -26,6 +30,58 @@ class Link(BaseModel):
     method: str
     uri: str
     type: str
+
+
+class EntryBase(BaseModel):
+    value: str
+    key: Optional[str] = None
+    createdBy: Optional[str] = None
+    modifiedBy: Optional[str] = None
+
+
+class EntryCreate(EntryBase):
+    pass
+
+
+class EntryUpdate(BaseModel):
+    value: Optional[str] = None
+    key: Optional[str] = None
+    modifiedBy: Optional[str] = None
+
+    model_config = {"extra": "forbid"}
+
+
+class JsonPatchOperation(BaseModel):
+    op: str
+    path: str
+    value: Optional[Any] = None
+    from_: Optional[str] = Field(None, alias="from")
+
+    model_config = {"populate_by_name": True}
+
+
+class Entry(BaseModel):
+    id: str
+    key: Optional[str] = None
+    value: str
+    creationTimeStamp: datetime
+    modifiedTimeStamp: datetime
+    createdBy: Optional[str] = None
+    modifiedBy: Optional[str] = None
+    version: int
+    contentId: str
+    _links: Optional[Dict[str, Link]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class EntryCollection(BaseModel):
+    items: List[Entry]
+    start: int
+    limit: int
+    count: int
+    _links: Optional[Dict[str, Link]] = None
 
 
 class DomainBase(BaseModel):
