@@ -83,6 +83,18 @@ def build_domain_links(request: Request, domain_id: str, domain_type: str) -> Di
             uri=f"{API_BASE}/domains/{domain_id}/contents",
             type=MEDIA_TYPE_CONTENT,
         ).model_dump(),
+        "getCurrentContents": schemas.Link(
+            href=f"{domain_url}/currentContents",
+            method="GET",
+            uri=f"{API_BASE}/domains/{domain_id}/currentContents",
+            type=MEDIA_TYPE_COLLECTION,
+        ).model_dump(),
+        "copyCurrentContent": schemas.Link(
+            href=f"{domain_url}/currentContents",
+            method="PATCH",
+            uri=f"{API_BASE}/domains/{domain_id}/currentContents",
+            type="application/json-patch+json",
+        ).model_dump(),
         "up": schemas.Link(
             href=f"{base_url}{API_BASE}/domains/",
             method="GET",
@@ -351,6 +363,125 @@ async def delete_content(
     if not success:
         raise HTTPException(status_code=404, detail="Content not found")
     return Response(status_code=204)
+
+
+def current_content_to_response(request: Request, content: models.Content) -> Dict[str, Any]:
+    return schemas.CurrentContent.model_validate(content).model_dump(mode="json")
+
+
+@app.get(f"{API_BASE}/domains/{{domain_id}}/currentContents", response_model=schemas.CurrentContentCollection)
+async def read_current_contents(
+    request: Request,
+    domain_id: str,
+    start: int = 0,
+    limit: int = 10,
+    db: AsyncSession = Depends(get_db),
+):
+    db_domain = await crud.get_domain(db, domain_id=domain_id)
+    if db_domain is None:
+        raise HTTPException(status_code=404, detail="Domain not found")
+
+    contents, total = await crud.get_production_contents_by_domain_id(
+        db, domain_id=domain_id, skip=start, limit=limit
+    )
+    base_url = str(request.base_url).rstrip("/")
+    cc_uri = f"{API_BASE}/domains/{domain_id}/currentContents"
+    items = [current_content_to_response(request, c) for c in contents]
+    result = {
+        "items": items,
+        "start": start,
+        "limit": limit,
+        "count": total,
+        "_links": {
+            "self": schemas.Link(
+                href=f"{base_url}{cc_uri}?start={start}&limit={limit}",
+                method="GET",
+                uri=cc_uri,
+                type=MEDIA_TYPE_COLLECTION,
+            ).model_dump(),
+            "copyToExecution": schemas.Link(
+                href=f"{base_url}{cc_uri}",
+                method="PATCH",
+                uri=cc_uri,
+                type="application/json-patch+json",
+            ).model_dump(),
+            "up": schemas.Link(
+                href=f"{base_url}{API_BASE}/domains/{domain_id}",
+                method="GET",
+                uri=f"{API_BASE}/domains/{domain_id}",
+                type=MEDIA_TYPE_DOMAIN,
+            ).model_dump(),
+        },
+    }
+    return JSONResponse(content=result, media_type=MEDIA_TYPE_COLLECTION)
+
+
+@app.patch(f"{API_BASE}/domains/{{domain_id}}/currentContents")
+async def patch_current_contents(
+    request: Request,
+    domain_id: str,
+    operations: List[Dict[str, Any]],
+    db: AsyncSession = Depends(get_db),
+):
+    db_domain = await crud.get_domain(db, domain_id=domain_id)
+    if db_domain is None:
+        raise HTTPException(status_code=404, detail="Domain not found")
+
+    if not operations:
+        raise HTTPException(status_code=400, detail="At least one JSON Patch operation is required")
+
+    current_prod = await crud.get_current_production_content(db, domain_id=domain_id)
+    if current_prod is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No content in production. A production content is required to copy to the execution environment.",
+        )
+
+    for op_data in operations:
+        op = op_data.get("op")
+        path = op_data.get("path", "")
+        value = op_data.get("value")
+
+        if op not in ["add", "replace", "copy"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported operation: {op}. Supported operations: add, replace, copy",
+            )
+
+        path_parts = path.strip("/").split("/") if path.strip("/") else []
+        top = path_parts[0] if path_parts else ""
+
+        if op == "copy":
+            if top and top != "execution":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported copy path: {path}. Only '/execution' is supported.",
+                )
+            label = None
+            if isinstance(value, dict):
+                label = value.get("label")
+            elif isinstance(value, str):
+                label = value
+            new_content = await crud.copy_content_to_execution(db, current_prod, label=label)
+            result = content_to_response(request, new_content)
+            return JSONResponse(content=result, media_type=MEDIA_TYPE_CONTENT, status_code=201)
+
+        if op in ["add", "replace"]:
+            if top != "execution":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported path: {path}. Only '/execution' is supported.",
+                )
+            label = None
+            if isinstance(value, dict):
+                label = value.get("label")
+            elif isinstance(value, str):
+                label = value
+            new_content = await crud.copy_content_to_execution(db, current_prod, label=label)
+            result = content_to_response(request, new_content)
+            return JSONResponse(content=result, media_type=MEDIA_TYPE_CONTENT, status_code=201)
+
+    raise HTTPException(status_code=400, detail="No copy/add/replace operation matched")
 
 
 ENTRIES_PATH = f"{API_BASE}/domains/{{domain_id}}/contents/{{content_id}}/entries"

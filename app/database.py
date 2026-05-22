@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite:///./reference_data.db"
+SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite:///./lookup_data.db"
 
 engine = create_async_engine(
     SQLALCHEMY_DATABASE_URL,
