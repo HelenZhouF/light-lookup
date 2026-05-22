@@ -55,3 +55,21 @@ class Content(Base):
 
     domainId = Column(String, ForeignKey("domains.id"), nullable=False)
     domain = relationship("Domain", back_populates="contents")
+
+    entries = relationship("Entry", back_populates="content", cascade="all, delete-orphan")
+
+
+class Entry(Base):
+    __tablename__ = "entries"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    key = Column(String(255), nullable=True)
+    value = Column(Text, nullable=False)
+    creationTimeStamp = Column(DateTime, default=datetime.utcnow, nullable=False)
+    modifiedTimeStamp = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    createdBy = Column(String(255), nullable=True)
+    modifiedBy = Column(String(255), nullable=True)
+    version = Column(Integer, default=1, nullable=False)
+
+    contentId = Column(String, ForeignKey("contents.id"), nullable=False)
+    content = relationship("Content", back_populates="entries")

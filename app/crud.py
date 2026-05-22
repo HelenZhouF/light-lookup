@@ -123,7 +123,10 @@ async def get_next_version_numbers(db: AsyncSession, domain_id: str) -> Tuple[in
 
 
 async def get_content_entry_count(db: AsyncSession, content_id: str) -> int:
-    return 0
+    result = await db.execute(
+        select(func.count()).select_from(models.Entry).where(models.Entry.contentId == content_id)
+    )
+    return result.scalar_one()
 
 
 async def create_content(
@@ -203,3 +206,109 @@ async def delete_content(db: AsyncSession, content_id: str) -> bool:
     await db.delete(db_content)
     await db.commit()
     return True
+
+
+async def get_entry(db: AsyncSession, entry_id: str) -> Optional[models.Entry]:
+    result = await db.execute(select(models.Entry).where(models.Entry.id == entry_id))
+    return result.scalar_one_or_none()
+
+
+async def get_entries_by_content_id(
+    db: AsyncSession, content_id: str, skip: int = 0, limit: int = 100
+) -> Tuple[List[models.Entry], int]:
+    count_result = await db.execute(
+        select(func.count()).select_from(models.Entry).where(models.Entry.contentId == content_id)
+    )
+    total = count_result.scalar_one()
+
+    result = await db.execute(
+        select(models.Entry)
+        .where(models.Entry.contentId == content_id)
+        .order_by(models.Entry.creationTimeStamp)
+        .offset(skip)
+        .limit(limit)
+    )
+    return result.scalars().all(), total
+
+
+async def get_all_entries_by_content_id(
+    db: AsyncSession, content_id: str
+) -> List[models.Entry]:
+    result = await db.execute(
+        select(models.Entry)
+        .where(models.Entry.contentId == content_id)
+        .order_by(models.Entry.creationTimeStamp)
+    )
+    return result.scalars().all()
+
+
+async def create_entry(
+    db: AsyncSession, content_id: str, entry: schemas.EntryCreate
+) -> models.Entry:
+    db_entry = models.Entry(
+        key=entry.key,
+        value=entry.value,
+        createdBy=entry.createdBy,
+        modifiedBy=entry.modifiedBy,
+        contentId=content_id,
+    )
+    db.add(db_entry)
+    await db.commit()
+    await db.refresh(db_entry)
+    return db_entry
+
+
+async def bulk_replace_entries(
+    db: AsyncSession, content_id: str, entries: List[schemas.EntryCreate]
+) -> List[models.Entry]:
+    await delete_all_entries_by_content_id(db, content_id)
+    created_entries = []
+    for entry in entries:
+        db_entry = models.Entry(
+            key=entry.key,
+            value=entry.value,
+            createdBy=entry.createdBy,
+            modifiedBy=entry.modifiedBy,
+            contentId=content_id,
+        )
+        db.add(db_entry)
+        created_entries.append(db_entry)
+    await db.commit()
+    for e in created_entries:
+        await db.refresh(e)
+    return created_entries
+
+
+async def update_entry(
+    db: AsyncSession, entry_id: str, entry: schemas.EntryUpdate
+) -> Optional[models.Entry]:
+    db_entry = await get_entry(db, entry_id)
+    if db_entry is None:
+        return None
+    update_data = entry.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_entry, key, value)
+    db_entry.modifiedTimeStamp = datetime.utcnow()
+    db_entry.version += 1
+    await db.commit()
+    await db.refresh(db_entry)
+    return db_entry
+
+
+async def delete_entry(db: AsyncSession, entry_id: str) -> bool:
+    db_entry = await get_entry(db, entry_id)
+    if db_entry is None:
+        return False
+    await db.delete(db_entry)
+    await db.commit()
+    return True
+
+
+async def delete_all_entries_by_content_id(db: AsyncSession, content_id: str) -> None:
+    result = await db.execute(
+        select(models.Entry).where(models.Entry.contentId == content_id)
+    )
+    entries = result.scalars().all()
+    for entry in entries:
+        await db.delete(entry)
+    await db.commit()
