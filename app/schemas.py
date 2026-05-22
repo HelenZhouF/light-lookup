@@ -174,3 +174,23 @@ class ContentCollection(BaseModel):
     limit: int
     count: int
     _links: Optional[Dict[str, Link]] = None
+
+
+class CurrentContent(BaseModel):
+    id: str
+    label: str
+    status: str
+    standing: str
+    productionStartTime: Optional[datetime] = None
+    productionEndTime: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CurrentContentCollection(BaseModel):
+    items: List[CurrentContent]
+    start: int
+    limit: int
+    count: int
+    _links: Optional[Dict[str, Link]] = None

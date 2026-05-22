@@ -109,6 +109,78 @@ async def get_current_production_content(db: AsyncSession, domain_id: str) -> Op
     return result.scalar_one_or_none()
 
 
+async def get_production_contents_by_domain_id(
+    db: AsyncSession, domain_id: str, skip: int = 0, limit: int = 100
+) -> Tuple[List[models.Content], int]:
+    base_stmt = select(models.Content).where(
+        models.Content.domainId == domain_id,
+        models.Content.productionStartTime.isnot(None),
+    )
+    count_result = await db.execute(
+        select(func.count()).select_from(base_stmt)
+    )
+    total = count_result.scalar_one()
+
+    result = await db.execute(
+        base_stmt
+        .order_by(
+            models.Content.productionStartTime.desc(),
+            models.Content.creationTimeStamp.desc(),
+        )
+        .offset(skip)
+        .limit(limit)
+    )
+    return result.scalars().all(), total
+
+
+async def get_current_execution_content(db: AsyncSession, domain_id: str) -> Optional[models.Content]:
+    result = await db.execute(
+        select(models.Content)
+        .where(
+            models.Content.domainId == domain_id,
+            models.Content.standing == "current",
+        )
+        .order_by(models.Content.creationTimeStamp.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def copy_content_to_execution(
+    db: AsyncSession, source: models.Content, label: Optional[str] = None
+) -> models.Content:
+    major, minor = await get_next_version_numbers(db, source.domainId)
+    new_label = label or f"{source.label} (execution copy)"
+    new_content = models.Content(
+        label=new_label,
+        status="developing",
+        standing="future",
+        majorNumber=major,
+        minorNumber=minor,
+        activationStatus="active",
+        createdBy=source.createdBy,
+        modifiedBy=source.modifiedBy,
+        domainId=source.domainId,
+    )
+    db.add(new_content)
+    await db.flush()
+
+    source_entries = await get_all_entries_by_content_id(db, source.id)
+    for entry in source_entries:
+        db_entry = models.Entry(
+            key=entry.key,
+            value=entry.value,
+            createdBy=entry.createdBy,
+            modifiedBy=entry.modifiedBy,
+            contentId=new_content.id,
+        )
+        db.add(db_entry)
+
+    await db.commit()
+    await db.refresh(new_content)
+    return new_content
+
+
 async def get_next_version_numbers(db: AsyncSession, domain_id: str) -> Tuple[int, int]:
     result = await db.execute(
         select(models.Content)
@@ -182,9 +254,12 @@ async def update_content(
             current_prod = await get_current_production_content(db, db_content.domainId)
             if current_prod is not None and current_prod.id != content_id:
                 current_prod.standing = "legacy"
+                current_prod.productionEndTime = datetime.utcnow()
                 current_prod.modifiedTimeStamp = datetime.utcnow()
                 current_prod.version += 1
             db_content.standing = "current"
+            db_content.productionStartTime = datetime.utcnow()
+            db_content.productionEndTime = None
 
     for key, value in update_data.items():
         if key == "status":

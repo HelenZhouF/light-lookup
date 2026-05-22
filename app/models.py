@@ -47,6 +47,8 @@ class Content(Base):
     majorNumber = Column(Integer, nullable=False, default=1)
     minorNumber = Column(Integer, nullable=False, default=0)
     activationStatus = Column(String(50), nullable=False, default="active")
+    productionStartTime = Column(DateTime, nullable=True)
+    productionEndTime = Column(DateTime, nullable=True)
     creationTimeStamp = Column(DateTime, default=datetime.utcnow, nullable=False)
     modifiedTimeStamp = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     createdBy = Column(String(255), nullable=True)
