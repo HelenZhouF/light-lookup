@@ -35,6 +35,9 @@ class Link(BaseModel):
 class EntryBase(BaseModel):
     value: str
     key: Optional[str] = None
+    disabled: Optional[bool] = None
+    sequence: Optional[int] = None
+    folderPath: Optional[str] = None
     createdBy: Optional[str] = None
     modifiedBy: Optional[str] = None
 
@@ -46,6 +49,9 @@ class EntryCreate(EntryBase):
 class EntryUpdate(BaseModel):
     value: Optional[str] = None
     key: Optional[str] = None
+    disabled: Optional[bool] = None
+    sequence: Optional[int] = None
+    folderPath: Optional[str] = None
     modifiedBy: Optional[str] = None
 
     model_config = {"extra": "forbid"}
@@ -64,6 +70,9 @@ class Entry(BaseModel):
     id: str
     key: Optional[str] = None
     value: str
+    disabled: bool = False
+    sequence: int = 0
+    folderPath: Optional[str] = None
     creationTimeStamp: datetime
     modifiedTimeStamp: datetime
     createdBy: Optional[str] = None

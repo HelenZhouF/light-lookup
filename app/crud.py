@@ -170,6 +170,9 @@ async def copy_content_to_execution(
         db_entry = models.Entry(
             key=entry.key,
             value=entry.value,
+            disabled=entry.disabled,
+            sequence=entry.sequence,
+            folderPath=entry.folderPath,
             createdBy=entry.createdBy,
             modifiedBy=entry.modifiedBy,
             contentId=new_content.id,
@@ -317,12 +320,37 @@ async def get_all_entries_by_content_id(
     return result.scalars().all()
 
 
+async def get_all_entry_keys_by_domain_id(
+    db: AsyncSession, domain_id: str
+) -> List[str]:
+    result = await db.execute(
+        select(models.Entry.key)
+        .join(models.Content, models.Entry.contentId == models.Content.id)
+        .where(models.Content.domainId == domain_id, models.Entry.key.isnot(None))
+    )
+    return [row[0] for row in result.all()]
+
+
+async def get_all_entry_values_by_domain_id(
+    db: AsyncSession, domain_id: str
+) -> List[str]:
+    result = await db.execute(
+        select(models.Entry.value)
+        .join(models.Content, models.Entry.contentId == models.Content.id)
+        .where(models.Content.domainId == domain_id)
+    )
+    return [row[0] for row in result.all()]
+
+
 async def create_entry(
     db: AsyncSession, content_id: str, entry: schemas.EntryCreate
 ) -> models.Entry:
     db_entry = models.Entry(
         key=entry.key,
         value=entry.value,
+        disabled=entry.disabled if entry.disabled is not None else False,
+        sequence=entry.sequence if entry.sequence is not None else 0,
+        folderPath=entry.folderPath,
         createdBy=entry.createdBy,
         modifiedBy=entry.modifiedBy,
         contentId=content_id,
@@ -342,6 +370,9 @@ async def bulk_replace_entries(
         db_entry = models.Entry(
             key=entry.key,
             value=entry.value,
+            disabled=entry.disabled if entry.disabled is not None else False,
+            sequence=entry.sequence if entry.sequence is not None else 0,
+            folderPath=entry.folderPath,
             createdBy=entry.createdBy,
             modifiedBy=entry.modifiedBy,
             contentId=content_id,
@@ -387,3 +418,137 @@ async def delete_all_entries_by_content_id(db: AsyncSession, content_id: str) ->
     for entry in entries:
         await db.delete(entry)
     await db.commit()
+
+
+async def get_all_entries_all_domains(db: AsyncSession):
+    result = await db.execute(
+        select(models.Entry, models.Content, models.Domain)
+        .join(models.Content, models.Entry.contentId == models.Content.id)
+        .join(models.Domain, models.Content.domainId == models.Domain.id)
+        .order_by(models.Domain.name, models.Content.creationTimeStamp, models.Entry.creationTimeStamp)
+    )
+    return result.all()
+
+
+async def bulk_import_domain_entries(
+    db: AsyncSession,
+    rows: list,
+) -> list:
+    by_domain = {}
+    for r in rows:
+        name = r.get("domainName")
+        if not name:
+            raise ValueError("domainName is required for every row")
+        if name not in by_domain:
+            by_domain[name] = []
+        by_domain[name].append(r)
+    created_entries = []
+    for domain_name, domain_rows in by_domain.items():
+        first = domain_rows[0]
+        description = first.get("domainDescription") or None
+        domain_type_raw = (first.get("domainType") or "lookup").strip().lower()
+        if domain_type_raw not in ("lookup", "valuelist", "value_list"):
+            raise ValueError(f"Invalid domainType '{domain_type_raw}' for domain '{domain_name}'")
+        domain_type = "valueList" if domain_type_raw in ("valuelist", "value_list") else "lookup"
+        created_by = first.get("createdBy") or None
+        modified_by = first.get("modifiedBy") or None
+
+        db_domain = await get_domain_by_name(db, name=domain_name)
+        if db_domain is None:
+            db_domain = models.Domain(
+                name=domain_name,
+                description=description,
+                domainType=domain_type,
+                createdBy=created_by,
+                modifiedBy=modified_by,
+            )
+            db.add(db_domain)
+            await db.flush()
+        else:
+            domain_type = db_domain.domainType
+
+        existing_keys: set = set()
+        if domain_type == "lookup":
+            existing_keys = set(await get_all_entry_keys_by_domain_id(db, db_domain.id))
+
+        existing_values: set = set()
+        if domain_type == "valueList":
+            existing_values = set(await get_all_entry_values_by_domain_id(db, db_domain.id))
+
+        major, minor = await get_next_version_numbers(db, db_domain.id)
+        db_content = models.Content(
+            label=f"{domain_name} - imported",
+            status="developing",
+            standing="future",
+            majorNumber=major,
+            minorNumber=minor,
+            activationStatus="active",
+            createdBy=created_by,
+            modifiedBy=modified_by,
+            domainId=db_domain.id,
+        )
+        db.add(db_content)
+        await db.flush()
+
+        seen_keys: set = set()
+        seen_values: set = set()
+        for r in domain_rows:
+            key = (r.get("key") or "").strip() or None
+            value = (r.get("value") or "").strip()
+            if not value:
+                raise ValueError(f"Entry 'value' is required for domain '{domain_name}'")
+
+            disabled_raw = r.get("disabled")
+            if isinstance(disabled_raw, bool):
+                disabled = disabled_raw
+            else:
+                disabled = str(disabled_raw or "").strip().lower() in ("true", "1", "yes", "y", "t")
+
+            sequence_raw = r.get("sequence")
+            if isinstance(sequence_raw, bool):
+                sequence = int(sequence_raw)
+            elif isinstance(sequence_raw, int):
+                sequence = sequence_raw
+            else:
+                s = str(sequence_raw or "").strip()
+                try:
+                    sequence = int(s) if s else 0
+                except ValueError:
+                    raise ValueError(f"Invalid sequence value '{sequence_raw}' for domain '{domain_name}'")
+
+            folder_path_raw = r.get("folderPath")
+            folder_path = str(folder_path_raw).strip() if folder_path_raw is not None and str(folder_path_raw).strip() else None
+
+            if domain_type == "lookup":
+                if not key:
+                    raise ValueError(f"Entry 'key' is required for lookup domain '{domain_name}'")
+                if key in seen_keys:
+                    raise ValueError(f"Duplicate key '{key}' in import batch for domain '{domain_name}'")
+                if key in existing_keys:
+                    raise ValueError(f"Key '{key}' already exists in domain '{domain_name}'")
+                seen_keys.add(key)
+
+            if domain_type == "valueList":
+                if value in seen_values:
+                    raise ValueError(f"Duplicate value '{value}' in import batch for domain '{domain_name}'")
+                if value in existing_values:
+                    raise ValueError(f"Value '{value}' already exists in domain '{domain_name}'")
+                seen_values.add(value)
+
+            db_entry = models.Entry(
+                key=key,
+                value=value,
+                disabled=disabled,
+                sequence=sequence,
+                folderPath=folder_path,
+                createdBy=created_by,
+                modifiedBy=modified_by,
+                contentId=db_content.id,
+            )
+            db.add(db_entry)
+            created_entries.append(db_entry)
+
+    await db.commit()
+    for e in created_entries:
+        await db.refresh(e)
+    return created_entries

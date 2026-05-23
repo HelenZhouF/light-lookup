@@ -4,6 +4,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 from contextlib import asynccontextmanager
 from pydantic import ValidationError
 import csv
@@ -25,6 +26,15 @@ API_BASE = "/api/v1/reference-data"
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(models.Base.metadata.create_all)
+        result = await conn.execute(text("PRAGMA table_info(entries)"))
+        existing = {row[1] for row in result.fetchall()}
+        for col_name, col_def in [
+            ("disabled", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("sequence", "INTEGER NOT NULL DEFAULT 0"),
+            ("folderPath", "VARCHAR(1024)"),
+        ]:
+            if col_name not in existing:
+                await conn.execute(text(f"ALTER TABLE entries ADD COLUMN {col_name} {col_def}"))
     yield
 
 
@@ -648,6 +658,11 @@ async def create_entries(
         if len(keys) != len(set(keys)):
             raise HTTPException(status_code=400, detail="Duplicate keys found in entries. Keys must be unique for lookup domain type")
 
+    if db_domain.domainType == "valueList":
+        values = [e.value for e in entries]
+        if len(values) != len(set(values)):
+            raise HTTPException(status_code=400, detail="Duplicate values found in entries. Values must be unique for valueList domain type")
+
     created = await crud.bulk_replace_entries(db, content_id=content_id, entries=entries)
     items = [entry_to_response(request, domain_id, content_id, e) for e in created]
     return JSONResponse(content=items, media_type=MEDIA_TYPE_ENTRY, status_code=201)
@@ -686,6 +701,11 @@ async def patch_entries(
                 existing_keys = [e.key for e in existing if e.key]
                 if value["key"] in existing_keys:
                     raise HTTPException(status_code=400, detail=f"Key '{value['key']}' already exists")
+            if db_domain.domainType == "valueList" and value.get("value"):
+                existing = await crud.get_all_entries_by_content_id(db, content_id=content_id)
+                existing_values = [e.value for e in existing]
+                if value["value"] in existing_values:
+                    raise HTTPException(status_code=400, detail=f"Value '{value['value']}' already exists")
             try:
                 new_entry = schemas.EntryCreate(**value)
             except ValidationError as e:
@@ -702,7 +722,7 @@ async def patch_entries(
 
             if len(path_parts) >= 2:
                 field_name = path_parts[1]
-                if field_name not in ["key", "value"]:
+                if field_name not in ["key", "value", "disabled", "sequence", "folderPath"]:
                     raise HTTPException(status_code=400, detail=f"Cannot modify field: {field_name}")
                 if field_name == "key":
                     if db_domain.domainType != "lookup":
@@ -718,6 +738,34 @@ async def patch_entries(
                     if value is None or not isinstance(value, str) or not value.strip():
                         raise HTTPException(status_code=400, detail="Value must be a non-empty string")
                     db_entry.value = value
+                elif field_name == "disabled":
+                    if isinstance(value, bool):
+                        db_entry.disabled = value
+                    elif isinstance(value, str):
+                        db_entry.disabled = value.strip().lower() in ("true", "1", "yes", "y", "t")
+                    elif isinstance(value, (int, float)):
+                        db_entry.disabled = bool(value)
+                    else:
+                        raise HTTPException(status_code=400, detail="disabled must be a boolean or boolean string")
+                elif field_name == "sequence":
+                    if isinstance(value, bool):
+                        db_entry.sequence = int(value)
+                    elif isinstance(value, int):
+                        db_entry.sequence = value
+                    elif isinstance(value, str):
+                        try:
+                            db_entry.sequence = int(value.strip())
+                        except ValueError:
+                            raise HTTPException(status_code=400, detail=f"Invalid sequence value: {value}")
+                    else:
+                        raise HTTPException(status_code=400, detail="sequence must be an integer")
+                elif field_name == "folderPath":
+                    if value is None:
+                        db_entry.folderPath = None
+                    elif isinstance(value, str):
+                        db_entry.folderPath = value.strip() or None
+                    else:
+                        raise HTTPException(status_code=400, detail="folderPath must be a string")
                 db_entry.modifiedTimeStamp = datetime.utcnow()
                 db_entry.version += 1
                 await db.commit()
@@ -765,3 +813,126 @@ async def delete_entries(
     check_production_protection(db_content)
     await crud.delete_all_entries_by_content_id(db, content_id=content_id)
     return Response(status_code=204)
+
+
+DOMAIN_ENTRIES_HEADERS = [
+    "domainName",
+    "domainDescription",
+    "folderPath",
+    "key",
+    "value",
+    "disabled",
+    "sequence",
+    "domainType",
+]
+
+
+def domain_entries_to_csv(rows: List[Dict[str, Any]], header: bool) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator="\n")
+    if header:
+        writer.writerow(DOMAIN_ENTRIES_HEADERS)
+    for row in rows:
+        writer.writerow([row.get(h, "") if row.get(h) is not None else "" for h in DOMAIN_ENTRIES_HEADERS])
+    return output.getvalue()
+
+
+def parse_csv_body(body: str) -> List[Dict[str, str]]:
+    if not body:
+        raise HTTPException(status_code=400, detail="CSV body is empty")
+    stream = io.StringIO(body)
+    reader = csv.reader(stream)
+    try:
+        header_row = next(reader)
+    except StopIteration:
+        return []
+    if len(header_row) != 8:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid CSV format: expected 8 columns, got {len(header_row)}",
+        )
+    header_row = [h.strip() for h in header_row]
+    missing = [h for h in DOMAIN_ENTRIES_HEADERS if h not in header_row]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV header is missing required columns: {', '.join(missing)}",
+        )
+    idx = {h: header_row.index(h) for h in DOMAIN_ENTRIES_HEADERS}
+    rows = []
+    for lineno, raw in enumerate(reader, start=2):
+        if not raw or all(not (c or "").strip() for c in raw):
+            continue
+        if len(raw) != 8:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid CSV format: expected 8 columns, got {len(raw)} at line {lineno}",
+            )
+        row = {h: raw[idx[h]] for h in DOMAIN_ENTRIES_HEADERS}
+        rows.append(row)
+    return rows
+
+
+@app.get(f"{API_BASE}/domainEntries/")
+async def export_domain_entries_csv(
+    request: Request,
+    header: str = "",
+    db: AsyncSession = Depends(get_db),
+):
+    include_header = str(header).strip().lower() == "present"
+    results = await crud.get_all_entries_all_domains(db)
+    rows = []
+    for entry, content, domain in results:
+        rows.append(
+            {
+                "domainName": domain.name or "",
+                "domainDescription": domain.description or "",
+                "folderPath": entry.folderPath or "",
+                "key": entry.key or "",
+                "value": entry.value or "",
+                "disabled": "true" if entry.disabled else "false",
+                "sequence": str(entry.sequence or 0),
+                "domainType": domain.domainType or "",
+            }
+        )
+    csv_data = domain_entries_to_csv(rows, include_header)
+    return Response(content=csv_data, media_type="text/csv")
+
+
+@app.post(f"{API_BASE}/domainEntries/", status_code=status.HTTP_201_CREATED)
+async def import_domain_entries_csv(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    content_type = request.headers.get("content-type", "")
+    if "text/csv" not in content_type and "application/json" not in content_type:
+        raise HTTPException(
+            status_code=400,
+            detail="Content-Type must be text/csv or application/json",
+        )
+
+    if "application/json" in content_type:
+        payload = await request.json()
+        if isinstance(payload, dict):
+            rows = payload.get("rows") or payload.get("entries") or []
+        else:
+            rows = payload
+        if not isinstance(rows, list):
+            raise HTTPException(status_code=400, detail="JSON payload must be a list of row objects")
+    else:
+        body = (await request.body()).decode("utf-8-sig")
+        rows = parse_csv_body(body)
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="No data rows provided")
+
+    try:
+        created = await crud.bulk_import_domain_entries(db, rows=rows)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return JSONResponse(
+        content={"count": len(created), "message": "Import completed successfully"},
+        media_type="application/json",
+        status_code=201,
+    )
