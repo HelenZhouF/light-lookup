@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import List, Optional, Tuple
-from sqlalchemy import select, func, case
+from sqlalchemy import select, func, case, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import models, schemas
@@ -552,3 +552,110 @@ async def bulk_import_domain_entries(
     for e in created_entries:
         await db.refresh(e)
     return created_entries
+
+
+async def get_global_variable(db: AsyncSession, variable_id: str) -> Optional[models.GlobalVariable]:
+    result = await db.execute(
+        select(models.GlobalVariable).where(models.GlobalVariable.id == variable_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_global_variable_by_name(db: AsyncSession, name: str) -> Optional[models.GlobalVariable]:
+    result = await db.execute(
+        select(models.GlobalVariable).where(models.GlobalVariable.name == name)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_global_variables(
+    db: AsyncSession,
+    skip: int = 0,
+    limit: int = 100,
+    name: Optional[str] = None,
+    data_type: Optional[str] = None,
+    default_value: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = "asc",
+) -> Tuple[List[models.GlobalVariable], int]:
+    stmt = select(models.GlobalVariable)
+    count_stmt = select(func.count()).select_from(models.GlobalVariable)
+
+    conditions = []
+    if name:
+        conditions.append(models.GlobalVariable.name.ilike(f"{name}%"))
+    if data_type:
+        conditions.append(models.GlobalVariable.dataType == data_type)
+    if default_value:
+        conditions.append(models.GlobalVariable.defaultValue.ilike(f"%{default_value}%"))
+
+    if conditions:
+        combined = and_(*conditions)
+        stmt = stmt.where(combined)
+        count_stmt = count_stmt.where(combined)
+
+    count_result = await db.execute(count_stmt)
+    total = count_result.scalar_one()
+
+    valid_sort_fields = {
+        "name": models.GlobalVariable.name,
+        "dataType": models.GlobalVariable.dataType,
+        "data_type": models.GlobalVariable.dataType,
+        "defaultValue": models.GlobalVariable.defaultValue,
+        "default_value": models.GlobalVariable.defaultValue,
+        "creationTimeStamp": models.GlobalVariable.creationTimeStamp,
+        "creation_timestamp": models.GlobalVariable.creationTimeStamp,
+        "modifiedTimeStamp": models.GlobalVariable.modifiedTimeStamp,
+        "modified_timestamp": models.GlobalVariable.modifiedTimeStamp,
+    }
+
+    order_column = valid_sort_fields.get(sort_by, models.GlobalVariable.name)
+    if sort_order and sort_order.lower() == "desc":
+        stmt = stmt.order_by(order_column.desc())
+    else:
+        stmt = stmt.order_by(order_column.asc())
+
+    stmt = stmt.offset(skip).limit(limit)
+    result = await db.execute(stmt)
+    return result.scalars().all(), total
+
+
+async def create_global_variable(
+    db: AsyncSession, variable: schemas.GlobalVariableCreate
+) -> models.GlobalVariable:
+    db_variable = models.GlobalVariable(
+        name=variable.name,
+        dataType=variable.dataType.value,
+        defaultValue=variable.defaultValue,
+        createdBy=variable.createdBy,
+        modifiedBy=variable.modifiedBy,
+    )
+    db.add(db_variable)
+    await db.commit()
+    await db.refresh(db_variable)
+    return db_variable
+
+
+async def update_global_variable(
+    db: AsyncSession, variable_id: str, variable: schemas.GlobalVariableUpdate
+) -> Optional[models.GlobalVariable]:
+    db_variable = await get_global_variable(db, variable_id)
+    if db_variable is None:
+        return None
+    update_data = variable.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_variable, key, value)
+    db_variable.modifiedTimeStamp = datetime.utcnow()
+    db_variable.version += 1
+    await db.commit()
+    await db.refresh(db_variable)
+    return db_variable
+
+
+async def delete_global_variable(db: AsyncSession, variable_id: str) -> bool:
+    db_variable = await get_global_variable(db, variable_id)
+    if db_variable is None:
+        return False
+    await db.delete(db_variable)
+    await db.commit()
+    return True

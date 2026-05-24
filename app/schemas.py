@@ -203,3 +203,58 @@ class CurrentContentCollection(BaseModel):
     limit: int
     count: int
     _links: Optional[Dict[str, Link]] = None
+
+
+MEDIA_TYPE_GLOBAL_VARIABLE = "application/vnd.sas.data.reference.global.variable+json"
+
+
+class GlobalVariableDataType(str, Enum):
+    string = "string"
+    decimal = "decimal"
+    integer = "integer"
+    boolean = "boolean"
+    date = "date"
+    datetime = "datetime"
+
+
+class GlobalVariableBase(BaseModel):
+    name: str = Field(..., max_length=255)
+    dataType: GlobalVariableDataType
+    defaultValue: Optional[str] = None
+    createdBy: Optional[str] = None
+    modifiedBy: Optional[str] = None
+
+
+class GlobalVariableCreate(GlobalVariableBase):
+    pass
+
+
+class GlobalVariableUpdate(BaseModel):
+    defaultValue: Optional[str] = None
+    modifiedBy: Optional[str] = None
+
+    model_config = {"extra": "forbid"}
+
+
+class GlobalVariable(BaseModel):
+    id: str
+    name: str
+    dataType: str
+    defaultValue: Optional[str] = None
+    creationTimeStamp: datetime
+    modifiedTimeStamp: datetime
+    createdBy: Optional[str] = None
+    modifiedBy: Optional[str] = None
+    version: int
+    _links: Optional[Dict[str, Link]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class GlobalVariableCollection(BaseModel):
+    items: List[GlobalVariable]
+    start: int
+    limit: int
+    count: int
+    _links: Optional[Dict[str, Link]] = None

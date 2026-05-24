@@ -18,6 +18,7 @@ MEDIA_TYPE_DOMAIN = "application/vnd.sas.data.reference.domain+json"
 MEDIA_TYPE_VALUELIST = "application/vnd.sas.data.reference.valuelist+json"
 MEDIA_TYPE_CONTENT = "application/vnd.sas.data.reference.content+json"
 MEDIA_TYPE_ENTRY = "application/vnd.sas.data.reference.entry+json"
+MEDIA_TYPE_GLOBAL_VARIABLE = "application/vnd.sas.data.reference.global.variable+json"
 MEDIA_TYPE_COLLECTION = "application/vnd.sas.collection+json"
 API_BASE = "/api/v1/reference-data"
 
@@ -936,3 +937,165 @@ async def import_domain_entries_csv(
         media_type="application/json",
         status_code=201,
     )
+
+
+def build_global_variable_links(request: Request, variable_id: str) -> Dict[str, Any]:
+    base_url = str(request.base_url).rstrip("/")
+    variable_url = f"{base_url}{API_BASE}/global-variables/{variable_id}"
+    variable_uri = f"{API_BASE}/global-variables/{variable_id}"
+    return {
+        "self": schemas.Link(
+            href=variable_url,
+            method="GET",
+            uri=variable_uri,
+            type=MEDIA_TYPE_GLOBAL_VARIABLE,
+        ).model_dump(),
+        "update": schemas.Link(
+            href=variable_url,
+            method="PUT",
+            uri=variable_uri,
+            type=MEDIA_TYPE_GLOBAL_VARIABLE,
+        ).model_dump(),
+        "delete": schemas.Link(
+            href=variable_url,
+            method="DELETE",
+            uri=variable_uri,
+            type=MEDIA_TYPE_GLOBAL_VARIABLE,
+        ).model_dump(),
+        "up": schemas.Link(
+            href=f"{base_url}{API_BASE}/global-variables/",
+            method="GET",
+            uri=f"{API_BASE}/global-variables/",
+            type=MEDIA_TYPE_GLOBAL_VARIABLE,
+        ).model_dump(),
+    }
+
+
+def global_variable_to_response(request: Request, variable: models.GlobalVariable) -> Dict[str, Any]:
+    data = schemas.GlobalVariable.model_validate(variable).model_dump(mode="json")
+    data["_links"] = build_global_variable_links(request, variable.id)
+    return data
+
+
+def _build_globals_query_string(
+    start: int, limit: int, **kwargs: Any
+) -> str:
+    parts = [f"start={start}", f"limit={limit}"]
+    for k, v in kwargs.items():
+        if v is not None:
+            parts.append(f"{k}={v}")
+    return "&".join(parts)
+
+
+@app.get(f"{API_BASE}/global-variables/", response_model=schemas.GlobalVariableCollection)
+async def read_global_variables(
+    request: Request,
+    start: int = 0,
+    limit: int = 10,
+    name: str = "",
+    dataType: str = "",
+    defaultValue: str = "",
+    sortBy: str = "name",
+    sortOrder: str = "asc",
+    db: AsyncSession = Depends(get_db),
+):
+    valid_data_types = {"string", "decimal", "integer", "boolean", "date", "datetime"}
+    if dataType and dataType not in valid_data_types:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid dataType value '{dataType}'. Valid values are: {', '.join(sorted(valid_data_types))}",
+        )
+    variables, total = await crud.get_global_variables(
+        db,
+        skip=start,
+        limit=limit,
+        name=name or None,
+        data_type=dataType or None,
+        default_value=defaultValue or None,
+        sort_by=sortBy,
+        sort_order=sortOrder,
+    )
+    base_url = str(request.base_url).rstrip("/")
+    items = [global_variable_to_response(request, v) for v in variables]
+    query = _build_globals_query_string(
+        start, limit, name=name or None, dataType=dataType or None,
+        defaultValue=defaultValue or None,
+        sortBy=sortBy, sortOrder=sortOrder,
+    )
+    result = {
+        "items": items,
+        "start": start,
+        "limit": limit,
+        "count": total,
+        "_links": {
+            "self": schemas.Link(
+                href=f"{base_url}{API_BASE}/global-variables/?{query}",
+                method="GET",
+                uri=f"{API_BASE}/global-variables/",
+                type=MEDIA_TYPE_GLOBAL_VARIABLE,
+            ).model_dump(),
+            "create": schemas.Link(
+                href=f"{base_url}{API_BASE}/global-variables/",
+                method="POST",
+                uri=f"{API_BASE}/global-variables/",
+                type=MEDIA_TYPE_GLOBAL_VARIABLE,
+            ).model_dump(),
+        },
+    }
+    return JSONResponse(content=result, media_type=MEDIA_TYPE_GLOBAL_VARIABLE)
+
+
+@app.post(
+    f"{API_BASE}/global-variables/",
+    response_model=schemas.GlobalVariable,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_global_variable(
+    request: Request,
+    variable: schemas.GlobalVariableCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    existing = await crud.get_global_variable_by_name(db, name=variable.name)
+    if existing:
+        raise HTTPException(status_code=400, detail="Global variable name already exists")
+    created = await crud.create_global_variable(db=db, variable=variable)
+    result = global_variable_to_response(request, created)
+    return JSONResponse(content=result, media_type=MEDIA_TYPE_GLOBAL_VARIABLE, status_code=201)
+
+
+@app.get(f"{API_BASE}/global-variables/{{variable_id}}", response_model=schemas.GlobalVariable)
+async def read_global_variable(
+    request: Request,
+    variable_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    db_variable = await crud.get_global_variable(db, variable_id=variable_id)
+    if db_variable is None:
+        raise HTTPException(status_code=404, detail="Global variable not found")
+    result = global_variable_to_response(request, db_variable)
+    return JSONResponse(content=result, media_type=MEDIA_TYPE_GLOBAL_VARIABLE)
+
+
+@app.put(f"{API_BASE}/global-variables/{{variable_id}}", response_model=schemas.GlobalVariable)
+async def update_global_variable(
+    request: Request,
+    variable_id: str,
+    variable: schemas.GlobalVariableUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    db_variable = await crud.update_global_variable(db=db, variable_id=variable_id, variable=variable)
+    if db_variable is None:
+        raise HTTPException(status_code=404, detail="Global variable not found")
+    result = global_variable_to_response(request, db_variable)
+    return JSONResponse(content=result, media_type=MEDIA_TYPE_GLOBAL_VARIABLE)
+
+
+@app.delete(f"{API_BASE}/global-variables/{{variable_id}}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_global_variable(
+    variable_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    success = await crud.delete_global_variable(db=db, variable_id=variable_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Global variable not found")
+    return Response(status_code=204)
