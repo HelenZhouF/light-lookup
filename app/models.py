@@ -78,3 +78,26 @@ class Entry(Base):
 
     contentId = Column(String, ForeignKey("contents.id"), nullable=False)
     content = relationship("Content", back_populates="entries")
+
+
+class GlobalVariableDataType(str):
+    STRING = "string"
+    DECIMAL = "decimal"
+    INTEGER = "integer"
+    BOOLEAN = "boolean"
+    DATE = "date"
+    DATETIME = "datetime"
+
+
+class GlobalVariable(Base):
+    __tablename__ = "global_variables"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(255), unique=True, index=True, nullable=False)
+    dataType = Column(String(50), nullable=False)
+    defaultValue = Column(Text, nullable=True)
+    creationTimeStamp = Column(DateTime, default=datetime.utcnow, nullable=False)
+    modifiedTimeStamp = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    createdBy = Column(String(255), nullable=True)
+    modifiedBy = Column(String(255), nullable=True)
+    version = Column(Integer, default=1, nullable=False)
